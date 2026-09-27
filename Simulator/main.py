@@ -328,9 +328,7 @@ def run_final(split_for_calibration=None, apply_calibrator=None, compute_permuta
         if compute_permutation:
             # calibrator가 있으면(버전 C) calibrator.predict_proba(), 없으면(버전 A/B) model.predict_proba()
             # 기준으로 permutation importance를 계산 -> evaluate() 내부의 확률 산출 방식과 동일하게 맞춤.
-            X_test = test_set[cols].copy()
-            cat_cols = X_test.select_dtypes(include="object").columns
-            X_test[cat_cols] = X_test[cat_cols].astype("category")
+            X_test, _ = cast_object_columns(test_set[cols].copy())
             y_test = test_set["is_phishing"]
             estimator = calibrator if calibrator is not None else model
             perm = permutation_importance(

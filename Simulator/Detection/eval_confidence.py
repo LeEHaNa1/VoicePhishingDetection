@@ -66,9 +66,7 @@ def run_confidence_analysis():
     calibrator = fit_calibrator(model, val_calib, feature_cols=feature_cols, method="isotonic")
 
     # 3. Test 세트 예측 확률 산출
-    X_test = test_set[feature_cols].copy()
-    cat_cols = X_test.select_dtypes(include="object").columns
-    X_test[cat_cols] = X_test[cat_cols].astype("category")
+    X_test, _ = cast_object_columns(test_set[feature_cols].copy())
     y_test = test_set["is_phishing"].to_numpy()
 
     # (1) 보정 전 원본 확률 (불균형 가중치로 팽창된 점수)

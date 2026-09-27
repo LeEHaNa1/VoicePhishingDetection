@@ -27,8 +27,7 @@ def prepare_categorical(df):
     # 새로 계산하지 않고 그대로 물려받으므로, 분할 전에 한 번만 하면 모든 조각이 동일한
     # 카테고리 코드북을 공유하게 됨.
     df = df.copy()
-    categorical_cols = df.select_dtypes(include="object").columns
-    df[categorical_cols] = df[categorical_cols].astype("category")
+    df, _ = cast_object_columns(df)
     return df
 
 
@@ -37,6 +36,16 @@ SCALAR_METRIC_KEYS = (
     "threshold", "accuracy", "precision", "recall", "f1",
     "PR-AUC", "Lift@Top5%", "Lift@Top10%", "Lift@Top20%",
 )
+
+def cast_object_columns(frame):
+    """object dtype 컬럼만 category로 바꾼다. 이미 category면 대상이 없어 값이 그대로다.
+
+    두 번째 반환값은 변환 전에 object였던 컬럼이다.
+    train에서 본 코드북을 val에 맞출 때 이 목록을 쓴다.
+    """
+    object_cols = frame.select_dtypes(include="object").columns
+    frame[object_cols] = frame[object_cols].astype("category")
+    return frame, object_cols
 
 
 def _resolve_feature_cols(feature_cols):
@@ -102,7 +111,7 @@ def train_model(df, val=None, feature_cols=None, hyperparams=None, model_type="X
     # "tuned_hyperparams" 참고). 넘기면 아래 기본값 위에 덮어씀(n_estimators/scale_pos_weight
     # 포함 전부 override 가능). None이면 기존 기본값 그대로 사용(하위 호환).
     feature_cols = _resolve_feature_cols(feature_cols)
-    X = df[feature_cols].copy()
+    X, categorical_cols = cast_object_columns(df[feature_cols].copy())
     y = df["is_phishing"]
 
     # 실제 category dtype 변환은 prepare_categorical()이 분할 전에 이미 끝내둠(fold 간
@@ -110,8 +119,6 @@ def train_model(df, val=None, feature_cols=None, hyperparams=None, model_type="X
     # 방어용 fallback일 뿐 -> object 컬럼이 남아있을 때만 동작(보통은 이미 없어서 no-op).
     # 주의: 이 fallback은 dtype이 아예 안 맞는 경우만 막아주고, prepare_categorical() 없이
     # train_fold/val_fold를 따로 변환하면 fold 간 카테고리 코드북이 어긋나는 문제(원래 버그)는 못 막음.
-    categorical_cols = X.select_dtypes(include="object").columns
-    X[categorical_cols] = X[categorical_cols].astype("category")
 
     # 클래스 불균형(피싱 1% vs 정상 99%) 보정.
     # scale_pos_weight = 음성 개수 / 양성 개수 -> 양성(피싱) 오분류에 더 큰 패널티를 줌.
@@ -213,10 +220,8 @@ def evaluate(model, df, feature_cols=None, threshold_df=None, pr_auc_method="tra
     # test set에서 하도록 분리해야 함.
     #   -> train 탐색 / test·val 평가는 반영됨. 별도 val 3분할은 아직 없음.
     def _prepare_xy(frame):
-        X_part = frame[feature_cols].copy()
         # prepare_categorical() 이후라면 보통 no-op. 직접 호출된 경우만 object→category.
-        cat_cols = X_part.select_dtypes(include="object").columns
-        X_part[cat_cols] = X_part[cat_cols].astype("category")
+        X_part, _ = cast_object_columns(frame[feature_cols].copy())
         return X_part, frame["is_phishing"]
 
     X, y = _prepare_xy(df)
@@ -271,9 +276,7 @@ def fit_calibrator(model, val_df, feature_cols, target_col="is_phishing", method
     # 과적합까지 "잘 보정된 것"처럼 왜곡됨).
     # method: "isotonic"(비모수, 표본이 충분할 때 권장) 또는 "sigmoid"(Platt scaling, 표본이 적을 때).
     feature_cols = _resolve_feature_cols(feature_cols)
-    X_val = val_df[feature_cols].copy()
-    cat_cols = X_val.select_dtypes(include="object").columns
-    X_val[cat_cols] = X_val[cat_cols].astype("category")
+    X_val, _ = cast_object_columns(val_df[feature_cols].copy())
     y_val = val_df[target_col]
 
     try:
