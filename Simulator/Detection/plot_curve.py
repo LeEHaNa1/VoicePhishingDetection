@@ -1,25 +1,19 @@
+from pathlib import Path
+
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import xgboost as xgb
-from sklearn.metrics import precision_recall_curve, auc
-from Simulator.schema import Track
-
-from Simulator.Detection.train_eval import split_data, prepare_categorical
-from Simulator.main import get_or_generate_final_dataset, load_tuned_hyperparams
-from Simulator.schema_utils import get_feature_columns
-
-from pathlib import Path
-import matplotlib.pyplot as plt
 import shap
 import xgboost as xgb
 
-from Simulator.Detection.train_eval import split_data, prepare_categorical, train_model
+from Simulator.Detection.train_eval import prepare_categorical, split_data, train_model
 from Simulator.main import get_or_generate_final_dataset, load_tuned_hyperparams
+from Simulator.schema import Track
 from Simulator.schema_utils import get_feature_columns
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _OUT_DIR = _PROJECT_ROOT / "shap_results"
+
 
 def plot_xgboost_learning_curve():
     # 1. 데이터 로드 및 전처리
@@ -89,10 +83,6 @@ def plot_xgboost_learning_curve():
     print("학습 곡선 그래프 생성 완료: xgboost_learning_curve.png")
 
 
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-_OUT_DIR = _PROJECT_ROOT / "shap_results"
-
-
 def run_shap_analysis():
     # 1. 데이터 로드 및 전처리 (동일 Split 기준)
     df = get_or_generate_final_dataset()
@@ -159,7 +149,7 @@ def run_shap_analysis():
 
 
 def get_shap_percentage_table(shap_values_obj, sample_idx):
-    # (이 함수 내용은 기존 작성하신 내용과 100% 동일하게 유지합니다)
+    """샘플 1건의 SHAP 값을 기여도(%)와 방향이 있는 표로 만든다."""
     local_shap_values = shap_values_obj[sample_idx].values
     feature_names = shap_values_obj.feature_names
     feature_values = shap_values_obj[sample_idx].data

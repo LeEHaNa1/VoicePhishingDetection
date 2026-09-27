@@ -59,7 +59,7 @@
 - 최종 모드: 팀이 확정한 값으로 데이터셋 확보(위 캐싱 로직 재사용) → 학습 → 최종 성능 출력
 - 민감도분석 모드: `sensitivity_analysis.py`를 호출해서, config.py의 각 파라미터를 하나씩 바꿔가며 여러 데이터셋 생성 → 학습 → 결과 비교표 출력
 - ablation 모드 : 파생 feature 검증 및 최종 후보 확정을 위한 pipeline 실행.
-- ablation_stability 모드 : ablation 모드로 이미 확정된 최종 파생 feature 조합의 성능 차이가 노이즈인지 K-Fold로 재검증.
+- ablation_stability 모드 : SCHEMA 미등록 잔여 후보(현재 9개, `ABLATION_STABILITY_FEATURE_SETS`)를 baseline에 더했을 때 성능 차이가 노이즈인지 K-Fold로 재검증. 확정 4개는 이미 baseline에 포함되어 있어 비교 대상에 넣지 않음.
 - tune 모드 : Optuna로 XGBoost/LightGBM 둘 다 하이퍼파라미터 탐색 후 val PR-AUC 더 높은 쪽(winner)을 선택
 - calib_compare 모드(2026-09-23 추가) : `run_final()`을 A(원본)/B(데이터만 축소)/C(calibration 적용) 3버전으로 실행해서 "학습 데이터 축소 효과"와 "calibration 자체 효과"를 분리해서 비교(왜 나눠야 하는지는 아래 "confidence calibration(A/B/C 분리)" 참고).
 

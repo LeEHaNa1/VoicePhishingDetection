@@ -4,9 +4,8 @@
 import optuna
 
 # 하이퍼파라미터 중요도 분석
-import optuna.importance 
+import optuna.importance
 import optuna.visualization as vis
-from optuna.importance import FanovaImportanceEvaluator
 import xgboost as xgb
 import lightgbm as lgb
 from sklearn.metrics import average_precision_score

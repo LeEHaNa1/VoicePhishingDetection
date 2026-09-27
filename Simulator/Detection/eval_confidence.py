@@ -6,11 +6,11 @@ from sklearn.model_selection import train_test_split
 
 from Simulator.main import get_or_generate_final_dataset, load_tuned_hyperparams
 from Simulator.Detection.train_eval import (
-    split_data,
-    prepare_categorical,
-    train_model,
+    cast_object_columns,
     fit_calibrator,
-    _resolve_feature_cols,
+    prepare_categorical,
+    split_data,
+    train_model,
 )
 from Simulator.schema_utils import get_feature_columns
 from Simulator.schema import Track
@@ -54,7 +54,7 @@ def run_confidence_analysis():
         stratify=train_set["is_phishing"]
     )
 
-    # 2. Track C 피처 기준 로드 (Track A 통신사망 제외, 21개 피처)[cite: 5]
+    # 2. Track C 피처 기준 로드 (Track A 통신사 망 제외)
     feature_cols = get_feature_columns(track_filter=[Track.DEVICE, Track.DEVICE_STRUCTURAL])
     model_type, hyperparams = load_tuned_hyperparams()
     model_type = model_type or "XGBoost"
@@ -62,7 +62,7 @@ def run_confidence_analysis():
     # 모델 학습 (train_sub로 학습)
     model = train_model(train_sub, feature_cols=feature_cols, hyperparams=hyperparams, model_type=model_type)
 
-    # Isotonic 보정기 적합 (val_calib로 적합)[cite: 2]
+    # Isotonic 보정기 적합 (val_calib로 적합)
     calibrator = fit_calibrator(model, val_calib, feature_cols=feature_cols, method="isotonic")
 
     # 3. Test 세트 예측 확률 산출
