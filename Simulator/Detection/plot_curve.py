@@ -1,178 +1,293 @@
-from pathlib import Path
+# 이 파일은 Simulator/Detection/plot_curve.py 위치에 두는 것을 전제로 작성됨
+# (eval_confidence.py와 동일한 위치/import 컨벤션 -> _PROJECT_ROOT = parent.parent.parent).
+#
+# Track B(단말만) / Track C(단말+구조적신호) 총 2개 조합에 대해 아래 4종 그래프를 생성:
+#   1. Learning Curve      : train_sub 크기별 train/test PR-AUC 추이 (Raw/Calibrated 구분)
+#   2. PR Curve             : test_set 기준 Precision-Recall 곡선 (Raw/Calibrated 구분)
+#   3. Cumulative Lift Curve: 예측 확률 상위 %별 누적 lift (Raw/Calibrated 구분)
+#   4. SHAP Summary Plot    : feature별 SHAP 값 분포 (Track당 1개, calibration과 무관 -> 아래
+#                             plot_shap_summary() 주석 참고: calibration 효과를 보고 싶으면
+#                             main.py::run_final()의 permutation_importance(B vs C 비교)를 쓸 것)
+#
+# 실행 방법 (프로젝트 루트에서):
+#   python -X utf8 -m Simulator.Detection.plot_curve
+# 결과는 plot_results/ 폴더에 저장됨.
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
+from pathlib import Path
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import precision_recall_curve, average_precision_score
 import shap
-import xgboost as xgb
 
-from Simulator.Detection.train_eval import prepare_categorical, split_data, train_model
-from Simulator.main import get_or_generate_final_dataset, load_tuned_hyperparams
-from Simulator.schema import Track
+from Simulator.main import (
+    get_or_generate_final_dataset,
+    load_tuned_hyperparams,
+    CALIBRATION_VAL_SIZE,
+    TRACK_SCENARIOS,
+)
+from Simulator.Detection.train_eval import (
+    cast_object_columns,
+    fit_calibrator,
+    prepare_categorical,
+    split_data,
+    train_model,
+)
 from Simulator.schema_utils import get_feature_columns
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-_OUT_DIR = _PROJECT_ROOT / "shap_results"
+_OUT_DIR = _PROJECT_ROOT / "plot_results"
+
+# Learning Curve에서 스윕할 train 크기 비율(train_sub 기준). 촘촘할수록 정확하지만 매 지점마다
+# 모델을 새로 학습(calibration=True면 calibrator까지)하므로 계산 비용이 배로 늘어남 -> 10개로 제한.
+LEARNING_CURVE_FRACTIONS = np.linspace(0.1, 1.0, 10)
+
+# Cumulative Lift Curve에서 스윕할 population 비율(상위 x%). 1% 단위로 100개 지점.
+LIFT_CURVE_FRACTIONS = np.linspace(0.01, 1.0, 100)
+
+# SHAP summary plot에 쓸 표본 수. 전체 test_set을 다 넣으면 계산이 오래 걸리므로 표본을 뽑아서 계산.
+SHAP_SAMPLE_SIZE = 500
 
 
-def plot_xgboost_learning_curve():
-    # 1. 데이터 로드 및 전처리
+def _prepare_splits():
+    """main.py::run_final()과 동일한 분할 방식(train_sub/val_calib/test_set)을 재사용.
+    이 파일의 모든 plot 함수가 동일한 분할을 공유해야 서로 비교 가능한 그래프가 나옴."""
     df = get_or_generate_final_dataset()
     df = prepare_categorical(df)
     train_set, test_set = split_data(df)
-
-    # 2. 최적 하이퍼파라미터 로드 및 피처 선택 (Track C: 전체 21개 피처 기준)
-    _, tuned_params = load_tuned_hyperparams()
-    # Track A(통신사 망) 제외: 단말(B) 및 단말 구조적 신호(C)만 지정
-    feature_cols = get_feature_columns(track_filter=[Track.DEVICE, Track.DEVICE_STRUCTURAL])
-
-    X_train = train_set[feature_cols]
-    y_train = train_set["is_phishing"]
-    X_test = test_set[feature_cols]
-    y_test = test_set["is_phishing"]
-
-    # 3. 과적합 관찰을 위해 n_estimators를 넉넉히 주고(예: 150) 학습 히스토리 기록
-    params = {
-        **tuned_params,
-        "n_estimators": 150,  # 최적값인 101 라운드 전후의 과적합 추이를 확인하기 위함
-        "eval_metric": ["logloss", "aucpr"],  # 손실함수 및 1% 불균형 핵심 지표(PR-AUC)
-        "tree_method": "hist",
-        "enable_categorical": True,
-        "random_state": 42,
-        "n_jobs": -1,
-    }
-
-    model = xgb.XGBClassifier(**params)
-
-    # eval_set에 train과 test를 모두 전달하여 라운드별 점수 기록
-    eval_set = [(X_train, y_train), (X_test, y_test)]
-    model.fit(X_train, y_train, eval_set=eval_set, verbose=False)
-
-    results = model.evals_result()
-    epochs = len(results["validation_0"]["logloss"])
-    x_axis = range(1, epochs + 1)
-
-    # 4. 시각화 (Logloss & PR-AUC 2개 서브플롯)
-    plt.figure(figsize=(14, 5))
-
-    # (1) Log Loss 곡선 (Loss 기반 과적합 확인)
-    plt.subplot(1, 2, 1)
-    plt.plot(x_axis, results["validation_0"]["logloss"], label="Train Logloss", color="blue")
-    plt.plot(x_axis, results["validation_1"]["logloss"], label="Test Logloss", color="red", linestyle="--")
-    plt.axvline(x=tuned_params.get("n_estimators", 101), color="green", linestyle=":", label=f"Best Iteration ({tuned_params.get('n_estimators', 101)})")
-    plt.title("XGBoost Log Loss Curve (Train vs Test)")
-    plt.xlabel("Boosting Rounds (n_estimators)")
-    plt.ylabel("Log Loss")
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-
-    # (2) PR-AUC 곡선 (불균형 탐지 성능 기반 과적합 확인)
-    plt.subplot(1, 2, 2)
-    plt.plot(x_axis, results["validation_0"]["aucpr"], label="Train PR-AUC", color="blue")
-    plt.plot(x_axis, results["validation_1"]["aucpr"], label="Test PR-AUC", color="red", linestyle="--")
-    plt.axvline(x=tuned_params.get("n_estimators", 101), color="green", linestyle=":", label=f"Best Iteration ({tuned_params.get('n_estimators', 101)})")
-    plt.title("XGBoost PR-AUC Curve (Train vs Test)")
-    plt.xlabel("Boosting Rounds (n_estimators)")
-    plt.ylabel("PR-AUC")
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-
-    plt.tight_layout()
-    plt.savefig("xgboost_learning_curve.png", dpi=300)
-    plt.show()
-    print("학습 곡선 그래프 생성 완료: xgboost_learning_curve.png")
+    train_sub, val_calib = train_test_split(
+        train_set,
+        test_size=CALIBRATION_VAL_SIZE,
+        random_state=42,
+        stratify=train_set["is_phishing"],
+    )
+    return train_sub, val_calib, test_set
 
 
-def run_shap_analysis():
-    # 1. 데이터 로드 및 전처리 (동일 Split 기준)
-    df = get_or_generate_final_dataset()
-    df = prepare_categorical(df)
-    train_set, test_set = split_data(df)
+def _get_feature_cols(track_name):
+    return get_feature_columns(track_filter=TRACK_SCENARIOS[track_name])
 
-    # 2. 최적 모델 및 하이퍼파라미터 로드
-    feature_cols = get_feature_columns()  # Track C (21개 피처)
+
+def _get_model_type_and_hyperparams():
     model_type, hyperparams = load_tuned_hyperparams()
-    model_type = model_type or "XGBoost"
+    return model_type or "XGBoost", hyperparams
 
-    # 모델 학습
-    model = train_model(train_set, feature_cols=feature_cols, hyperparams=hyperparams, model_type=model_type)
 
-    X_test = test_set[feature_cols]
+def _get_proba(model, calibrator, X, use_calibration):
+    """use_calibration 여부에 따라 원본 model 확률 또는 calibrator 확률 반환.
+    train_eval.py::evaluate()의 분기 방식과 동일하게 맞춤."""
+    if use_calibration:
+        return calibrator.predict_proba(X)[:, 1]
+    return model.predict_proba(X)[:, 1]
+
+
+# ------------------------------------------------------------
+# 1. Learning Curve
+# ------------------------------------------------------------
+def compute_learning_curve_data(track_name, use_calibration, train_sub, val_calib, test_set):
+    """train_sub를 여러 크기로 잘라가며(LEARNING_CURVE_FRACTIONS) 각 크기에서 모델을 새로 학습하고,
+    train subset 자기 자신과 test_set에 대한 PR-AUC(average_precision)를 기록.
+    use_calibration=True면 매 크기마다 val_calib으로 calibrator도 새로 적합해서 그 확률로 채점
+    (학습 데이터가 줄어들수록 calibration 품질 자체도 같이 나빠지는지까지 반영하기 위함)."""
+    feature_cols = _get_feature_cols(track_name)
+    model_type, hyperparams = _get_model_type_and_hyperparams()
+
+    n_total = len(train_sub)
+    sizes, train_scores, val_scores = [], [], []
+
+    for frac in LEARNING_CURVE_FRACTIONS:
+        n_sub = max(int(n_total * frac), 20)  # 표본이 너무 적으면(양성 0개 등) 불안정해지므로 최소 20개 보장
+        if n_sub >= n_total:
+            subset = train_sub
+        else:
+            subset, _ = train_test_split(
+                train_sub,
+                train_size=n_sub,
+                random_state=42,
+                stratify=train_sub["is_phishing"],
+            )
+
+        model = train_model(subset, feature_cols=feature_cols, hyperparams=hyperparams, model_type=model_type)
+        calibrator = (
+            fit_calibrator(model, val_calib, feature_cols=feature_cols, method="isotonic")
+            if use_calibration else None
+        )
+
+        X_train, _ = cast_object_columns(subset[feature_cols].copy())
+        X_test, _ = cast_object_columns(test_set[feature_cols].copy())
+
+        proba_train = _get_proba(model, calibrator, X_train, use_calibration)
+        proba_test = _get_proba(model, calibrator, X_test, use_calibration)
+
+        train_scores.append(average_precision_score(subset["is_phishing"], proba_train))
+        val_scores.append(average_precision_score(test_set["is_phishing"], proba_test))
+        sizes.append(n_sub)
+
+    return np.array(sizes), np.array(train_scores), np.array(val_scores)
+
+
+def plot_learning_curve(track_name, use_calibration, train_sub, val_calib, test_set, out_dir):
+    sizes, train_scores, val_scores = compute_learning_curve_data(
+        track_name, use_calibration, train_sub, val_calib, test_set
+    )
+
+    calib_label = "Calibrated" if use_calibration else "Raw"
+    plt.figure(figsize=(7, 6))
+    plt.plot(sizes, train_scores, "o-", color="darkorange", label="Train PR-AUC")
+    plt.plot(sizes, val_scores, "o-", color="royalblue", label="Test PR-AUC")
+    plt.title(f"[Track {track_name} | {calib_label}] Learning Curve", fontsize=12, pad=12)
+    plt.xlabel("Training Set Size")
+    plt.ylabel("PR-AUC (Average Precision)")
+    plt.legend(loc="best")
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+
+    out_path = out_dir / f"learning_curve_track{track_name}_{calib_label.lower()}.png"
+    plt.savefig(out_path, dpi=300)
+    plt.close()
+    return out_path
+
+
+# ------------------------------------------------------------
+# 2. PR Curve
+# ------------------------------------------------------------
+def plot_pr_curve(track_name, use_calibration, model, calibrator, test_set, out_dir):
+    feature_cols = _get_feature_cols(track_name)
+    X_test, _ = cast_object_columns(test_set[feature_cols].copy())
     y_test = test_set["is_phishing"]
 
-    # 3. SHAP TreeExplainer 계산
-    explainer = shap.TreeExplainer(model)
-    shap_values = explainer(X_test)
+    proba = _get_proba(model, calibrator, X_test, use_calibration)
+    precision, recall, _ = precision_recall_curve(y_test, proba)
+    ap = average_precision_score(y_test, proba)
 
+    calib_label = "Calibrated" if use_calibration else "Raw"
+    base_rate = y_test.mean()
+
+    plt.figure(figsize=(7, 6))
+    plt.plot(recall, precision, color="crimson", label=f"PR Curve (AP={ap:.4f})")
+    plt.hlines(base_rate, 0, 1, colors="gray", linestyles="--", label=f"Baseline (Phishing rate={base_rate:.4f})")
+    plt.title(f"[Track {track_name} | {calib_label}] Precision-Recall Curve", fontsize=12, pad=12)
+    plt.xlabel("Recall")
+    plt.ylabel("Precision")
+    plt.legend(loc="best")
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+
+    out_path = out_dir / f"pr_curve_track{track_name}_{calib_label.lower()}.png"
+    plt.savefig(out_path, dpi=300)
+    plt.close()
+    return out_path
+
+
+# ------------------------------------------------------------
+# 3. Cumulative Lift Curve
+# ------------------------------------------------------------
+def plot_cumulative_lift(track_name, use_calibration, model, calibrator, test_set, out_dir):
+    feature_cols = _get_feature_cols(track_name)
+    X_test, _ = cast_object_columns(test_set[feature_cols].copy())
+    y_test = test_set["is_phishing"].to_numpy()
+
+    proba = _get_proba(model, calibrator, X_test, use_calibration)
+    order = np.argsort(proba)[::-1]  # 예측 확률 내림차순 정렬
+    y_sorted = y_test[order]
+
+    n = len(y_sorted)
+    base_rate = y_sorted.mean()
+
+    cum_lift = []
+    for frac in LIFT_CURVE_FRACTIONS:
+        cutoff = max(int(np.ceil(n * frac)), 1)
+        top_rate = y_sorted[:cutoff].mean()
+        cum_lift.append(top_rate / base_rate if base_rate > 0 else 0.0)
+
+    calib_label = "Calibrated" if use_calibration else "Raw"
+
+    plt.figure(figsize=(7, 6))
+    plt.plot(LIFT_CURVE_FRACTIONS * 100, cum_lift, color="royalblue", label="Cumulative Lift")
+    plt.hlines(1.0, 0, 100, colors="gray", linestyles="--", label="Baseline (Lift=1)")
+    plt.title(f"[Track {track_name} | {calib_label}] Cumulative Lift Curve", fontsize=12, pad=12)
+    plt.xlabel("Top % of Population (예측 확률 상위 %)")
+    plt.ylabel("Lift")
+    plt.legend(loc="best")
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+
+    out_path = out_dir / f"cumulative_lift_track{track_name}_{calib_label.lower()}.png"
+    plt.savefig(out_path, dpi=300)
+    plt.close()
+    return out_path
+
+
+# ------------------------------------------------------------
+# 4. SHAP Summary Plot
+# ------------------------------------------------------------
+# SHAP은 calibration(후처리 확률 재정렬)과 무관하게 "모델의 판단 함수 자체"를 설명하는 도구라
+# Raw/Calibrated로 나눌 이유가 없음(isotonic은 단조 변환이라 방향성이 거의 안 바뀌고, calibrator를
+# 굳이 model-agnostic Explainer로 다시 설명하는 건 비용만 크고 얻는 해석은 거의 없음).
+# calibration 자체의 영향력을 보고 싶으면 main.py::run_final()의 permutation_importance(B vs C
+# 비교)를 쓸 것 -> 그게 이 목적에 맞는 지표임. 그래서 SHAP은 Track당 1개, model 기준으로만 계산.
+def plot_shap_summary(track_name, model, test_set, out_dir):
+    feature_cols = _get_feature_cols(track_name)
+    X_test, _ = cast_object_columns(test_set[feature_cols].copy())
+
+    sample_n = min(SHAP_SAMPLE_SIZE, len(X_test))
+    X_sample = X_test.sample(n=sample_n, random_state=42)
+
+    explainer = shap.TreeExplainer(model)
+    shap_values = explainer.shap_values(X_sample)
+
+    plt.figure()
+    shap.summary_plot(shap_values, X_sample, feature_names=feature_cols, show=False)
+    plt.title(f"[Track {track_name}] SHAP Summary", fontsize=12, pad=12)
+    plt.tight_layout()
+
+    out_path = out_dir / f"shap_summary_track{track_name}.png"
+    plt.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close()
+    return out_path
+
+
+# ------------------------------------------------------------
+# 전체 실행
+# ------------------------------------------------------------
+def run_all_plots():
+    """Track B/C별로 Learning/PR/Lift는 Calibration 유/무(Raw/Calibrated) 구분해서, SHAP은 calibration과
+    무관하게 Track당 1개만 생성해서 plot_results/ 폴더에 저장. model/calibrator는 Track당 한 번만 학습해서
+    SHAP/PR/Lift가 공유함(Raw/Calibrated가 같은 model 기반이므로). Learning Curve는 크기별로 자체적으로
+    다시 학습하므로 별도 루프."""
+    train_sub, val_calib, test_set = _prepare_splits()
     _OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # -------------------------------------------------------------
-    # 그래프 1: 전역 요약 플롯 (Beeswarm Summary Plot)
-    # -------------------------------------------------------------
-    plt.figure(figsize=(10, 8))
-    shap.summary_plot(shap_values, X_test, feature_names=feature_cols, show=False)
-    plt.title(f"[{model_type}] Track C Global SHAP Summary Plot", fontsize=14, pad=15)
-    summary_path = _OUT_DIR / "shap_summary_plot.png"
-    plt.tight_layout()
-    plt.savefig(summary_path, dpi=300)
-    plt.close()
-    print(f"전역 SHAP 플롯 저장 완료: {summary_path}")
+    saved_paths = []
 
-    # -------------------------------------------------------------
-    # 그래프 2: 실제 피싱 사건 1건에 대한 알림 근거 플롯 (Waterfall Plot)
-    # -------------------------------------------------------------
-    phishing_indices = test_set.index[test_set["is_phishing"] == 1].tolist()
-    sample_loc = test_set.index.get_loc(phishing_indices[0])
+    for track_name in TRACK_SCENARIOS:
+        feature_cols = _get_feature_cols(track_name)
+        model_type, hyperparams = _get_model_type_and_hyperparams()
 
-    plt.figure(figsize=(9, 6))
-    shap.plots.waterfall(shap_values[sample_loc], max_display=8, show=False)
-    plt.title(f"User Alert Explanation (Sample #{sample_loc})", fontsize=13, pad=12)
-    waterfall_path = _OUT_DIR / "shap_local_waterfall_plot.png"
-    plt.tight_layout()
-    plt.savefig(waterfall_path, dpi=300)
-    plt.close()
-    print(f"개별 알림용 Waterfall 플롯 저장 완료: {waterfall_path}")
+        # PR/Lift용 model+calibrator는 Track당 한 번만 학습(Raw/Calibrated가 같은 model 공유).
+        model = train_model(train_sub, feature_cols=feature_cols, hyperparams=hyperparams, model_type=model_type)
+        calibrator = fit_calibrator(model, val_calib, feature_cols=feature_cols, method="isotonic")
 
-    # -------------------------------------------------------------
-    # 💡 [추가된 부분] 3: 직관적인 백분율(%) 표 출력 및 저장
-    # -------------------------------------------------------------
-    df_table = get_shap_percentage_table(shap_values, sample_loc)
-    
-    print("\n🚨 [사용자 알림 UI 연계용 탐지 근거 분석 표] 🚨")
-    # .to_string()을 사용하여 중간에 생략되는 행 없이 터미널에 전체 표를 깔끔하게 출력
-    print(df_table.to_string(index=False)) 
-    
-    # 보고서 첨부 및 타 모듈 전달을 위해 CSV 파일로도 저장
-    table_path = _OUT_DIR / "shap_percentage_table.csv"
-    df_table.to_csv(table_path, index=False, encoding="utf-8-sig")
-    print(f"\n기여도 백분율 표 저장 완료: {table_path}")
+        # SHAP은 calibration과 무관하게 model 기준으로 Track당 1개만 생성(위 plot_shap_summary 주석 참고).
+        saved_paths.append(plot_shap_summary(track_name, model, test_set, _OUT_DIR))
+
+        for use_calibration in (False, True):
+            saved_paths.append(
+                plot_learning_curve(track_name, use_calibration, train_sub, val_calib, test_set, _OUT_DIR)
+            )
+            saved_paths.append(
+                plot_pr_curve(track_name, use_calibration, model, calibrator, test_set, _OUT_DIR)
+            )
+            saved_paths.append(
+                plot_cumulative_lift(track_name, use_calibration, model, calibrator, test_set, _OUT_DIR)
+            )
+
+    print(f"총 {len(saved_paths)}개 그래프 저장 완료 -> {_OUT_DIR}")
+    for p in saved_paths:
+        print(f"  - {p.name}")
+    return saved_paths
 
 
-def get_shap_percentage_table(shap_values_obj, sample_idx):
-    """샘플 1건의 SHAP 값을 기여도(%)와 방향이 있는 표로 만든다."""
-    local_shap_values = shap_values_obj[sample_idx].values
-    feature_names = shap_values_obj.feature_names
-    feature_values = shap_values_obj[sample_idx].data
-    
-    abs_shap = np.abs(local_shap_values)
-    total_abs_shap = np.sum(abs_shap)
-    percentages = (abs_shap / total_abs_shap) * 100
-    
-    df_explanation = pd.DataFrame({
-        "탐지 근거 (Feature)": feature_names,
-        "실제 행동 값 (Value)": feature_values,
-        "기여도 (%)": np.round(percentages, 1),
-        "영향 방향": ["위험 증가 🚨" if val > 0 else "위험 감소 ⬇️" for val in local_shap_values]
-    })
-    
-    df_explanation = df_explanation.sort_values(by="기여도 (%)", ascending=False).reset_index(drop=True)
-    return df_explanation
-
-
-# 중복된 __main__ 블록을 하나로 합쳐서 두 시각화가 모두 차례대로 실행되게 수정
 if __name__ == "__main__":
-    print("1. XGBoost 학습 곡선(Learning Curve) 시각화를 시작합니다...")
-    plot_xgboost_learning_curve()
-    
-    print("\n2. SHAP 전역 기여도 및 사용자 알림용 백분율(%) 분석을 시작합니다...")
-    run_shap_analysis()
+    run_all_plots()
