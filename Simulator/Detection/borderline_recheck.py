@@ -16,7 +16,13 @@ from sklearn.inspection import permutation_importance
 
 from Simulator.schema import Track
 from Simulator.schema_utils import get_feature_columns
-from Simulator.Detection.train_eval import split_data, train_model, evaluate, prepare_categorical
+from Simulator.Detection.train_eval import (
+    SCALAR_METRIC_KEYS,
+    evaluate,
+    prepare_categorical,
+    split_data,
+    train_model,
+)
 from Simulator.main import get_or_generate_final_dataset, load_tuned_hyperparams, TRACK_SCENARIOS
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -24,8 +30,7 @@ _OUT_DIR = _PROJECT_ROOT / "borderline_recheck_results"
 
 WEAK_DERIVED = ["is_sms_initiated_unreg", "repeat_pressure_intensity"]
 PERM_N_REPEATS = 10
-SCALAR_KEYS = ["threshold", "accuracy", "precision", "recall", "f1", "PR-AUC",
-               "Lift@Top5%", "Lift@Top10%", "Lift@Top20%"]
+SCALAR_KEYS = SCALAR_METRIC_KEYS
 
 
 def _scalar_metrics(result):

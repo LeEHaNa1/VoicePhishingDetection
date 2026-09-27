@@ -8,7 +8,15 @@ from sklearn.model_selection import train_test_split
 from sklearn.inspection import permutation_importance
 from Simulator.Generation import config
 from Simulator.Generation.dataset_builder import build_dataset
-from Simulator.Detection.train_eval import split_data, train_model, evaluate, prepare_categorical, fit_calibrator
+from Simulator.Detection.train_eval import (
+    SCALAR_METRIC_KEYS,
+    cast_object_columns,
+    evaluate,
+    fit_calibrator,
+    prepare_categorical,
+    split_data,
+    train_model,
+)
 from Simulator.Detection.sensitivity_analysis import run_sensitivity, run_stress_sensitivity
 from Simulator.Detection.feature_ablation import (
     run_feature_selection_pipeline,
@@ -208,7 +216,7 @@ def generate_final_dataset():
     # SCHEMA에 이름이 등록되어 있는 column 전부 반환(원본 23개 + 파생 4개 = 27개) + 라벨 별도로 추가(SCHEMA에 없으므로)
     keep_cols = get_schema_column_names() + ["is_phishing", "incident_type"]
 
-    # kepp_cols 사용해서 df의 38개 column 중 29개만 걸러짐. (나머지는 이때 모두 자동으로 걸러짐)
+    # keep_cols에 있는 컬럼만 남긴다. 목록에 없는 파생 후보는 여기서 빠진다.
     df = df[[c for c in keep_cols if c in df.columns]]
     save_final_dataset(df)  # Detection 쪽 가공(category 변환/분할) 전, 생성 직후의 원본을 저장
     return df
@@ -342,10 +350,7 @@ _CALIBRATION_RESULTS_DIR = _PROJECT_ROOT / "calibration_results"
 # classification_report(str)는 JSON에 못 넣거나 너무 장황해서 제외) -> sensitivity_analysis.py::
 # summarize_fold_results()와 동일한 "스칼라만 저장" 컨벤션. feature_importance(gain)는 아래
 # _version_summary()에서 별도로 붙임(diff 계산 대상은 아니라서 이 튜플에는 안 넣음).
-_FINAL_SCALAR_METRIC_KEYS = (
-    "threshold", "accuracy", "precision", "recall", "f1",
-    "PR-AUC", "Lift@Top5%", "Lift@Top10%", "Lift@Top20%",
-)
+_FINAL_SCALAR_METRIC_KEYS = SCALAR_METRIC_KEYS
 
 
 def _scalar_metrics(result):

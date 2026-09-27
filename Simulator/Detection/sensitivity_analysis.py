@@ -9,7 +9,7 @@ from sklearn.model_selection import StratifiedKFold
 
 from Simulator.Generation.dataset_builder import build_dataset
 from Simulator.schema_utils import get_feature_columns
-from Simulator.Detection.train_eval import train_model, evaluate, prepare_categorical
+from Simulator.Detection.train_eval import SCALAR_METRIC_KEYS, evaluate, prepare_categorical, train_model
 from Simulator.Detection.derived_features import add_candidate_features
 
 # 결과 저장 폴더: 실행 위치(cwd)와 무관하게 항상 프로젝트 루트 기준으로 고정.
@@ -27,10 +27,7 @@ def summarize_fold_results(fold_results: List[dict]) -> dict:
     스칼라가 아닌 건 저장 파일을 깔끔하게 유지하기 위해 요약에서 제외.
     sem(표준오차, std/sqrt(K)): fold를 늘렸을 때(K가 클수록) 평균이 더 정밀해지는 걸
     반영하는 값 -> 후보값 간 차이가 "노이즈보다 큰지" 판단할 땐 std보다 이 값을 기준으로 봐야 함."""
-    scalar_keys = [
-        "threshold", "accuracy", "precision", "recall", "f1",
-        "PR-AUC", "Lift@Top5%", "Lift@Top10%", "Lift@Top20%",
-    ]
+    scalar_keys = SCALAR_METRIC_KEYS
     k = len(fold_results)
     summary = {}
     for key in scalar_keys:

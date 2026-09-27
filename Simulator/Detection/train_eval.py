@@ -32,6 +32,13 @@ def prepare_categorical(df):
     return df
 
 
+# evaluate()가 돌려주는 스칼라 지표 키. 요약·비교 JSON은 이 순서 그대로 저장한다.
+SCALAR_METRIC_KEYS = (
+    "threshold", "accuracy", "precision", "recall", "f1",
+    "PR-AUC", "Lift@Top5%", "Lift@Top10%", "Lift@Top20%",
+)
+
+
 def _resolve_feature_cols(feature_cols):
     # feature_cols 존재하는 경우: Track 시나리오(Track A,B,C)나 ablation용 커스텀 컬럼 목록이 넘어온 경우 -> 그대로 사용
     # feature_cols 존재하지 않는 경우: 민감도 분석 진행 -> 전체 feature 모두 사용

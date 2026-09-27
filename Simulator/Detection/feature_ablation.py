@@ -49,7 +49,13 @@ from sklearn.model_selection import train_test_split, StratifiedKFold
 
 from Simulator.Generation.dataset_builder import build_dataset
 from Simulator.schema_utils import get_feature_columns
-from Simulator.Detection.train_eval import train_model, evaluate, prepare_categorical, split_data
+from Simulator.Detection.train_eval import (
+    SCALAR_METRIC_KEYS,
+    evaluate,
+    prepare_categorical,
+    split_data,
+    train_model,
+)
 from Simulator.Detection.derived_features import add_candidate_features
 from Simulator.Detection.sensitivity_analysis import summarize_fold_results
 
@@ -97,8 +103,7 @@ DEFAULT_STABILITY_K = 10  # run_stability_check() 기본 K. 재검증 성격이�
 def _metrics_summary(m):
     """evaluate() 반환값에서 threshold/accuracy/precision/recall/f1/PR-AUC/Lift@Top5~20%만 추려서
     저장용 요약 dict으로 만드는 함수. run_feature_selection_pipeline()과 run_stability_check()가 공유."""
-    return {k: m[k] for k in ("threshold", "accuracy", "precision", "recall", "f1", "PR-AUC",
-                               "Lift@Top5%", "Lift@Top10%", "Lift@Top20%")}
+    return {k: m[k] for k in SCALAR_METRIC_KEYS}
 
 
 def _select_by_correlation(train_df, candidate_features, target_col="is_phishing", threshold=0.8):
