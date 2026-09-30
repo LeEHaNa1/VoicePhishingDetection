@@ -116,18 +116,18 @@ python -X utf8 -m Simulator.main -m final
 
 ## 결과
 
-### Track별 최종 성능 (`-m final`, 2026-09-21)
+### Track별 최종 성능 (`-m final`, 보정 적용 후 γ 기준)
 
-N=100,000, train 70,000 / test 30,000 (피싱 298건). 모델은 Optuna 탐색 후 **XGBoost**(val PR-AUC 0.9941 > LightGBM 0.9935)와 `optuna_results/best_params.json`의 `tuned_hyperparams`를 사용. PR-AUC는 `average_precision_score`. threshold는 train에서만 고르고 test에 고정 적용.
+N=100,000, train 70,000 / test 30,000 (피싱 298건). 모델은 Optuna 탐색 후 **XGBoost**(val PR-AUC 0.9941 > LightGBM 0.9935)와 `optuna_results/best_params.json`의 `tuned_hyperparams`를 사용. PR-AUC는 `average_precision_score`. threshold는 train에서만 고르고 test에 고정 적용. `-m final`은 기본 설정(`CALIBRATION_APPLY=True`)에서 confidence calibration이 적용된 확률(γ)로 평가하므로, 아래는 그 결과다. 보정 전(α/β)과의 비교는 아래 "confidence calibration의 적용 여부" 참고.
 
 | Track               | precision | recall | f1     | PR-AUC | Lift@Top5% | Lift@Top10% | FN (미탐) |
 | ------------------- | --------- | ------ | ------ | ------ | ---------- | ----------- | --------- |
-| B (단말만)          | 0.9891    | 0.9161 | 0.9512 | 0.9727 | 19.66      | 9.87        | 25/298    |
-| C (단말+구조적신호) | 0.9931    | 0.9664 | 0.9796 | 0.9911 | 19.93      | 10.00       | 10/298    |
+| B (단말만)          | 0.9856    | 0.9161 | 0.9496 | 0.9695 | 19.66      | 9.87        | 25/298    |
+| C (단말+구조적신호) | 1.0000    | 0.9698 | 0.9847 | 0.9857 | 19.80      | 9.90        | 9/298     |
 
-**메인 결과는 Track C.** B 대비 F1 +0.028, PR-AUC +0.018, 미탐 25건→10건. Lift@Top10%/20%는 C가 이론상 상한(10.0 / 5.0)에 도달했다.
+**메인 결과는 Track C.** B 대비 F1 +0.035, PR-AUC +0.016, 미탐 25건→9건.
 
-혼동행렬(test): B는 FP 3 / FN 25, C는 FP 2 / FN 10.
+혼동행렬(test): B는 FP 4 / FN 25, C는 FP 0 / FN 9.
 
 #### Confidence Calibration 비교(`-m calib_compare`)
 
