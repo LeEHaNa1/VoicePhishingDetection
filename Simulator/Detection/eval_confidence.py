@@ -1,8 +1,9 @@
 # Simulator/Detection/eval_confidence.py
 # Confidence Calibration(isotonic)의 효과를 Track B/C별로 정량 평가:
 #   - ECE(quantile / uniform bin), Brier score, LogLoss, 평균 예측확률 vs 실제 피싱 비율, PR-AUC
-#   - paired bootstrap으로 "보정 전/후 ECE 차이"의 신뢰구간 -> 개선이 우연인지 판단
 #   - Reliability Diagram(3-panel): 선형 / log-log / 예측확률 분포 히스토그램
+# 참고: 유의성 검정(부트스트랩 등)은 보고서 범위에서 제외하여 이 스크립트에도 포함하지 않음
+#      (표본 크기 한계는 보고서에 별도로 명시).
 # 결과: calibration_results/reliability_diagram_track{B,C}.png, confidence_metrics.json
 #
 # 실행: python -X utf8 -m Simulator.Detection.eval_confidence
@@ -43,8 +44,6 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _OUT_DIR = _PROJECT_ROOT / "calibration_results"
 
 N_BINS = 10            # ECE/reliability용 bin 개수
-N_BOOT = 200           # paired bootstrap 반복 횟수
-BOOT_SEED = 42         # bootstrap 재현성 고정
 GAP_TOLERANCE = 0.10   # 평균 예측확률이 실제 비율의 ±10% 이내면 "평균 정렬"로 판정
 _EPS = 1e-15
 NEAR_ZERO = 1e-6      # 이 값 이하의 예측확률은 사실상 0으로 취급(isotonic의 0 plateau 진단용)
@@ -173,35 +172,6 @@ def tail_bin_table(y_true, proba, edges=TAIL_EDGES):
     return rows
 
 
-def bootstrap_ece_diff(y_true, raw_proba, calib_proba, n_boot=N_BOOT, n_bins=N_BINS, seed=BOOT_SEED):
-    """test set을 복원추출로 n_boot번 다시 뽑아, 같은 표본에서 보정 전/후 ECE를 나란히 계산(paired).
-    diff = ECE_calibrated - ECE_raw. 95% 구간이 0을 포함하지 않고 음수면 '보정으로 ECE가 유의하게 감소'."""
-    y = np.asarray(y_true)
-    raw = np.asarray(raw_proba, dtype=float)
-    cal = np.asarray(calib_proba, dtype=float)
-    rng = np.random.default_rng(seed)
-    n = len(y)
-
-    raw_e, cal_e = [], []
-    for _ in range(n_boot):
-        idx = rng.integers(0, n, n)
-        if y[idx].sum() == 0:
-            continue  # 양성이 하나도 없는 표본은 ECE 의미가 없어 건너뜀
-        raw_e.append(_ece_quantile(y[idx], raw[idx], n_bins))
-        cal_e.append(_ece_quantile(y[idx], cal[idx], n_bins))
-
-    raw_e, cal_e = np.array(raw_e), np.array(cal_e)
-    diff = cal_e - raw_e
-    ci = lambda a: [float(np.percentile(a, 2.5)), float(np.percentile(a, 97.5))]
-    return {
-        "n_boot_used": int(len(diff)),
-        "ece_raw_ci95": ci(raw_e),
-        "ece_calibrated_ci95": ci(cal_e),
-        "ece_diff_mean(calibrated-raw)": float(diff.mean()),
-        "ece_diff_ci95": ci(diff),
-        "prob_calibrated_not_better": float((diff >= 0).mean()),
-    }
-
 
 # ------------------------------------------------------------
 # 시각화
@@ -309,7 +279,7 @@ def plot_tail_reliability(tail_by_track, out_dir):
 # ------------------------------------------------------------
 # 실행
 # ------------------------------------------------------------
-def _print_report(track_name, raw_m, cal_m, boot):
+def _print_report(track_name, raw_m, cal_m):
     rows = [
         ("ECE (quantile)", "ece_quantile"), ("ECE (uniform)", "ece_uniform"),
         ("Brier", "brier"), ("LogLoss", "log_loss"),
@@ -324,10 +294,6 @@ def _print_report(track_name, raw_m, cal_m, boot):
         print(f"{label:<16}{raw_m[key]:>16.5f}{cal_m[key]:>20.5f}")
     print(f"상태(Raw)       : {raw_m['status']}")
     print(f"상태(Calibrated): {cal_m['status']}")
-    lo, hi = boot["ece_diff_ci95"]
-    print(f"ECE 차이(보정후-보정전) bootstrap {boot['n_boot_used']}회: "
-          f"평균 {boot['ece_diff_mean(calibrated-raw)']:+.4f}, 95% CI [{lo:+.4f}, {hi:+.4f}], "
-          f"'보정이 더 낫지 않은' 비율 {boot['prob_calibrated_not_better']:.1%}")
     print(f"확률≈0(≤{NEAR_ZERO:g}) 표본 비율  Raw {raw_m['frac_near_zero_proba']:.1%} / Calibrated {cal_m['frac_near_zero_proba']:.1%}"
           f"  | 그 안의 실제 피싱 수 {raw_m['positives_in_near_zero']} / {cal_m['positives_in_near_zero']}")
     print(f"서로 다른 확률값 개수         Raw {raw_m['n_unique_proba']} / Calibrated {cal_m['n_unique_proba']}")
@@ -360,7 +326,7 @@ def run_confidence_analysis():
 
     _OUT_DIR.mkdir(parents=True, exist_ok=True)
     tail_by_track = {}
-    payload = {"n_bins": N_BINS, "n_boot": N_BOOT, "calibration_val_size": CALIBRATION_VAL_SIZE, "tracks": {}}
+    payload = {"n_bins": N_BINS, "calibration_val_size": CALIBRATION_VAL_SIZE, "tracks": {}}
 
     for track_name, tracks in TRACK_SCENARIOS.items():
         feature_cols = get_feature_columns(track_filter=tracks)
@@ -374,9 +340,8 @@ def run_confidence_analysis():
 
         raw_m, raw_bins = compute_calibration_metrics(y_test, raw_proba)
         cal_m, cal_bins = compute_calibration_metrics(y_test, calib_proba)
-        boot = bootstrap_ece_diff(y_test, raw_proba, calib_proba)
 
-        _print_report(track_name, raw_m, cal_m, boot)
+        _print_report(track_name, raw_m, cal_m)
         raw_tail, cal_tail = tail_bin_table(y_test, raw_proba), tail_bin_table(y_test, calib_proba)
         tail_by_track[track_name] = {"raw": raw_tail, "calibrated": cal_tail}
         _print_tail_table(raw_tail, cal_tail)
@@ -384,7 +349,7 @@ def run_confidence_analysis():
         print(f"신뢰도 다이어그램 저장: {out_path}")
 
         payload["tracks"][track_name] = {
-            "raw": raw_m, "calibrated": cal_m, "bootstrap": boot,
+            "raw": raw_m, "calibrated": cal_m,
             "quantile_bins": {"raw": bins_to_rows(raw_bins), "calibrated": bins_to_rows(cal_bins)},
             "tail_bins": {"raw": raw_tail, "calibrated": cal_tail},
         }
