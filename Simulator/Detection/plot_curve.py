@@ -1,25 +1,20 @@
 # 이 파일은 Simulator/Detection/plot_curve.py 위치에 두는 것을 전제로 작성됨
 # (eval_confidence.py와 동일한 위치/import 컨벤션 -> _PROJECT_ROOT = parent.parent.parent).
 #
-# Track B(단말만) / Track C(단말+구조적신호) 총 2개 조합에 대해 아래 4종 그래프를 생성:
+# Track B(단말만) / Track C(단말+구조적신호) 총 2개 조합에 대해 아래 2종 그래프를 생성:
 #   1. Learning Curve      : train_sub 크기별 train/test PR-AUC 추이 (Raw/Calibrated 구분)
-#   2. PR Curve             : test_set 기준 Precision-Recall 곡선 (Raw/Calibrated 구분)
-#   3. Cumulative Lift Curve: 예측 확률 상위 %별 누적 lift (Raw/Calibrated 구분)
-#   4. SHAP Summary Plot    : feature별 SHAP 값 분포 (Track당 1개, calibration과 무관 -> 아래
-#                             plot_shap_summary() 주석 참고: calibration 효과를 보고 싶으면
-#                             main.py::run_final()의 permutation_importance(B vs C 비교)를 쓸 것)
+#   2. Cumulative Lift Curve: 예측 확률 상위 %별 누적 lift (Raw/Calibrated 구분)
+# PR Curve/SHAP은 보고서에서 제외되어 이 스크립트에서도 뺌.
 #
 # 실행 방법 (프로젝트 루트에서):
 #   python -X utf8 -m Simulator.Detection.plot_curve
 # 결과는 plot_results/ 폴더에 저장됨.
 
 import numpy as np
-import pandas as pd
 import matplotlib.pyplot as plt
 from pathlib import Path
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import precision_recall_curve, average_precision_score
-import shap
+from sklearn.metrics import average_precision_score
 
 from Simulator.main import (
     get_or_generate_final_dataset,
@@ -45,10 +40,6 @@ LEARNING_CURVE_FRACTIONS = np.linspace(0.1, 1.0, 10)
 
 # Cumulative Lift Curve에서 스윕할 population 비율(상위 x%). 1% 단위로 100개 지점.
 LIFT_CURVE_FRACTIONS = np.linspace(0.01, 1.0, 100)
-
-# SHAP summary plot에 쓸 표본 수. 전체 test_set을 다 넣으면 계산이 오래 걸리므로 표본을 뽑아서 계산.
-SHAP_SAMPLE_SIZE = 500
-
 
 def _prepare_splits():
     """main.py::run_final()과 동일한 분할 방식(train_sub/val_calib/test_set)을 재사용.
@@ -150,38 +141,7 @@ def plot_learning_curve(track_name, use_calibration, train_sub, val_calib, test_
 
 
 # ------------------------------------------------------------
-# 2. PR Curve
-# ------------------------------------------------------------
-def plot_pr_curve(track_name, use_calibration, model, calibrator, test_set, out_dir):
-    feature_cols = _get_feature_cols(track_name)
-    X_test, _ = cast_object_columns(test_set[feature_cols].copy())
-    y_test = test_set["is_phishing"]
-
-    proba = _get_proba(model, calibrator, X_test, use_calibration)
-    precision, recall, _ = precision_recall_curve(y_test, proba)
-    ap = average_precision_score(y_test, proba)
-
-    calib_label = "Calibrated" if use_calibration else "Raw"
-    base_rate = y_test.mean()
-
-    plt.figure(figsize=(7, 6))
-    plt.plot(recall, precision, color="crimson", label=f"PR Curve (AP={ap:.4f})")
-    plt.hlines(base_rate, 0, 1, colors="gray", linestyles="--", label=f"Baseline (Phishing rate={base_rate:.4f})")
-    plt.title(f"[Track {track_name} | {calib_label}] Precision-Recall Curve", fontsize=12, pad=12)
-    plt.xlabel("Recall")
-    plt.ylabel("Precision")
-    plt.legend(loc="best")
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-
-    out_path = out_dir / f"pr_curve_track{track_name}_{calib_label.lower()}.png"
-    plt.savefig(out_path, dpi=300)
-    plt.close()
-    return out_path
-
-
-# ------------------------------------------------------------
-# 3. Cumulative Lift Curve
+# 2. Cumulative Lift Curve
 # ------------------------------------------------------------
 def plot_cumulative_lift(track_name, use_calibration, model, calibrator, test_set, out_dir):
     feature_cols = _get_feature_cols(track_name)
@@ -207,7 +167,7 @@ def plot_cumulative_lift(track_name, use_calibration, model, calibrator, test_se
     plt.plot(LIFT_CURVE_FRACTIONS * 100, cum_lift, color="royalblue", label="Cumulative Lift")
     plt.hlines(1.0, 0, 100, colors="gray", linestyles="--", label="Baseline (Lift=1)")
     plt.title(f"[Track {track_name} | {calib_label}] Cumulative Lift Curve", fontsize=12, pad=12)
-    plt.xlabel("Top % of Population (예측 확률 상위 %)")
+    plt.xlabel("Top % of Population")
     plt.ylabel("Lift")
     plt.legend(loc="best")
     plt.grid(True, alpha=0.3)
@@ -219,43 +179,15 @@ def plot_cumulative_lift(track_name, use_calibration, model, calibrator, test_se
     return out_path
 
 
-# ------------------------------------------------------------
-# 4. SHAP Summary Plot
-# ------------------------------------------------------------
-# SHAP은 calibration(후처리 확률 재정렬)과 무관하게 "모델의 판단 함수 자체"를 설명하는 도구라
-# Raw/Calibrated로 나눌 이유가 없음(isotonic은 단조 변환이라 방향성이 거의 안 바뀌고, calibrator를
-# 굳이 model-agnostic Explainer로 다시 설명하는 건 비용만 크고 얻는 해석은 거의 없음).
-# calibration 자체의 영향력을 보고 싶으면 main.py::run_final()의 permutation_importance(B vs C
-# 비교)를 쓸 것 -> 그게 이 목적에 맞는 지표임. 그래서 SHAP은 Track당 1개, model 기준으로만 계산.
-def plot_shap_summary(track_name, model, test_set, out_dir):
-    feature_cols = _get_feature_cols(track_name)
-    X_test, _ = cast_object_columns(test_set[feature_cols].copy())
-
-    sample_n = min(SHAP_SAMPLE_SIZE, len(X_test))
-    X_sample = X_test.sample(n=sample_n, random_state=42)
-
-    explainer = shap.TreeExplainer(model)
-    shap_values = explainer.shap_values(X_sample)
-
-    plt.figure()
-    shap.summary_plot(shap_values, X_sample, feature_names=feature_cols, show=False)
-    plt.title(f"[Track {track_name}] SHAP Summary", fontsize=12, pad=12)
-    plt.tight_layout()
-
-    out_path = out_dir / f"shap_summary_track{track_name}.png"
-    plt.savefig(out_path, dpi=300, bbox_inches="tight")
-    plt.close()
-    return out_path
-
 
 # ------------------------------------------------------------
 # 전체 실행
 # ------------------------------------------------------------
 def run_all_plots():
-    """Track B/C별로 Learning/PR/Lift는 Calibration 유/무(Raw/Calibrated) 구분해서, SHAP은 calibration과
-    무관하게 Track당 1개만 생성해서 plot_results/ 폴더에 저장. model/calibrator는 Track당 한 번만 학습해서
-    SHAP/PR/Lift가 공유함(Raw/Calibrated가 같은 model 기반이므로). Learning Curve는 크기별로 자체적으로
-    다시 학습하므로 별도 루프."""
+    """Track B/C별로 Learning Curve와 Cumulative Lift Curve를 Calibration 유/무(Raw/Calibrated)로
+    구분해서 plot_results/ 폴더에 저장. model/calibrator는 Track당 한 번만 학습해서 Lift Curve가
+    공유함(Raw/Calibrated가 같은 model 기반이므로). Learning Curve는 크기별로 자체적으로 다시
+    학습하므로 별도 루프."""
     train_sub, val_calib, test_set = _prepare_splits()
     _OUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -265,19 +197,13 @@ def run_all_plots():
         feature_cols = _get_feature_cols(track_name)
         model_type, hyperparams = _get_model_type_and_hyperparams()
 
-        # PR/Lift용 model+calibrator는 Track당 한 번만 학습(Raw/Calibrated가 같은 model 공유).
+        # Lift Curve용 model+calibrator는 Track당 한 번만 학습(Raw/Calibrated가 같은 model 공유).
         model = train_model(train_sub, feature_cols=feature_cols, hyperparams=hyperparams, model_type=model_type)
         calibrator = fit_calibrator(model, val_calib, feature_cols=feature_cols, method="isotonic")
-
-        # SHAP은 calibration과 무관하게 model 기준으로 Track당 1개만 생성(위 plot_shap_summary 주석 참고).
-        saved_paths.append(plot_shap_summary(track_name, model, test_set, _OUT_DIR))
 
         for use_calibration in (False, True):
             saved_paths.append(
                 plot_learning_curve(track_name, use_calibration, train_sub, val_calib, test_set, _OUT_DIR)
-            )
-            saved_paths.append(
-                plot_pr_curve(track_name, use_calibration, model, calibrator, test_set, _OUT_DIR)
             )
             saved_paths.append(
                 plot_cumulative_lift(track_name, use_calibration, model, calibrator, test_set, _OUT_DIR)
