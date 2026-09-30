@@ -1,10 +1,14 @@
 # Simulator/Detection/eval_confidence.py
 # Confidence Calibration(isotonic)의 효과를 Track B/C별로 정량 평가:
 #   - ECE(quantile / uniform bin), Brier score, LogLoss, 평균 예측확률 vs 실제 피싱 비율, PR-AUC
-#   - Reliability Diagram(3-panel): 선형 / log-log / 예측확률 분포 히스토그램
-# 참고: 유의성 검정(부트스트랩 등)은 보고서 범위에서 제외하여 이 스크립트에도 포함하지 않음
-#      (표본 크기 한계는 보고서에 별도로 명시).
-# 결과: calibration_results/reliability_diagram_track{B,C}.png, confidence_metrics.json
+#   - Tail Reliability Diagram(상위 구간별, 보고서 본문용) -> plot_tail_reliability() 참고
+# 참고1: 유의성 검정(부트스트랩 등)은 보고서 범위에서 제외하여 이 스크립트에도 포함하지 않음
+#       (표본 크기 한계는 보고서에 별도로 명시).
+# 참고2: 10-분위 bin 기준 3-panel reliability diagram(선형/log-log/분포 히스토그램)은 삭제됨 -
+#       극단적 클래스 불균형(피싱 1%) 때문에 분위수 bin 대부분이 양성 0개가 되거나(보정 전)
+#       동점으로 병합되어 유효 bin이 1개까지 줄어(보정 후, 특히 Track C) 구간별 보정 품질을
+#       비교하는 본래 목적을 구조적으로 달성할 수 없어 통계적으로 의미 있는 정보를 못 줌.
+# 결과: calibration_results/tail_reliability_diagram.png, confidence_metrics.json
 #
 # 실행: python -X utf8 -m Simulator.Detection.eval_confidence
 #
@@ -21,7 +25,6 @@ from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
-from matplotlib.ticker import FuncFormatter, NullFormatter
 from sklearn.metrics import average_precision_score, brier_score_loss, log_loss
 from sklearn.model_selection import train_test_split
 
@@ -173,77 +176,6 @@ def tail_bin_table(y_true, proba, edges=TAIL_EDGES):
 
 
 
-# ------------------------------------------------------------
-# 시각화
-# ------------------------------------------------------------
-def _plain_log_ticks(ax, axis="both"):
-    """로그 축 눈금을 10^-4 같은 mathtext 대신 0.0001 같은 일반 숫자로 표시.
-    맑은 고딕 등 일부 한글 폰트는 mathtext의 지수 마이너스 글리프가 없어 눈금이 깨져 보임."""
-    fmt = FuncFormatter(lambda v, _: f"{v:g}")
-    for name in ("x", "y"):
-        if axis in (name, "both"):
-            a = ax.xaxis if name == "x" else ax.yaxis
-            a.set_major_formatter(fmt)
-            a.set_minor_formatter(NullFormatter())
-
-
-def _plot_loglog(ax, bins, color, marker, label, floor):
-    """log 축에는 0을 그릴 수 없으므로 양성 0개 bin은 선으로 잇지 않고 하한에 빈 삼각형으로 따로 표시
-    (하한에 점을 이어 그리면 '확률 1e-4로 평평한 곡선'처럼 오해됨)."""
-    mean_pred, frac_pos = np.asarray(bins[0]), np.asarray(bins[1])
-    nz = frac_pos > 0
-    ax.plot(np.clip(mean_pred[nz], floor, 1), frac_pos[nz], marker + "-", color=color, label=label)
-    if (~nz).any():
-        ax.scatter(np.clip(mean_pred[~nz], floor, 1), np.full((~nz).sum(), floor), marker="v",
-                   facecolors="none", edgecolors=color, label=f"{label}: zero-positive bins (plotted at floor)")
-
-
-def plot_reliability(track_name, raw_m, raw_bins, cal_m, cal_bins, raw_proba, calib_proba, out_dir):
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5.5))
-    floor = 1e-4  # log 축에서 0을 그릴 수 없어 하한으로 표시
-
-    # (1) 선형 reliability
-    ax = axes[0]
-    ax.plot([0, 1], [0, 1], "k--", alpha=0.7, label="Perfect (y=x)")
-    ax.plot(raw_bins[0], raw_bins[1], "s-", color="crimson", label=f"Before (ECE {raw_m['ece_quantile']:.4f})")
-    ax.plot(cal_bins[0], cal_bins[1], "o-", color="royalblue", label=f"After (ECE {cal_m['ece_quantile']:.4f})")
-    ax.set_xlim(0, 1); ax.set_ylim(0, 1)
-    ax.set_xlabel("Mean Predicted Probability (Confidence)")
-    ax.set_ylabel("Fraction of Positives (Empirical Frequency)")
-    ax.set_title("Reliability (linear, quantile bins)")
-    ax.legend(loc="upper left"); ax.grid(True, alpha=0.3)
-
-    # (2) log-log reliability: 피싱 1%라 낮은 확률 구간이 선형 축에서는 뭉개져 보임
-    ax = axes[1]
-    ax.plot([floor, 1], [floor, 1], "k--", alpha=0.7, label="Perfect")
-    _plot_loglog(ax, raw_bins, "crimson", "s", "Before", floor)
-    _plot_loglog(ax, cal_bins, "royalblue", "o", "After", floor)
-    ax.set_xscale("log"); ax.set_yscale("log")
-    _plain_log_ticks(ax)
-    ax.set_xlabel("Mean Predicted Probability (log)")
-    ax.set_ylabel("Fraction of Positives (log)")
-    ax.set_title("Reliability (log-log)")
-    ax.legend(loc="upper left", fontsize=8); ax.grid(True, alpha=0.3, which="both")
-
-    # (3) 예측확률 분포: 각 bin의 신뢰도를 얼마나 많은 표본이 뒷받침하는지 확인
-    ax = axes[2]
-    bins = np.logspace(-6, 0, 40)
-    ax.hist(np.clip(raw_proba, 1e-6, 1), bins=bins, alpha=0.55, color="crimson", label="Before")
-    ax.hist(np.clip(calib_proba, 1e-6, 1), bins=bins, alpha=0.55, color="royalblue", label="After")
-    ax.set_xscale("log"); ax.set_yscale("log")
-    _plain_log_ticks(ax)
-    ax.set_xlabel("Predicted Probability (log)")
-    ax.set_ylabel("Count (log)")
-    ax.set_title("Predicted probability distribution")
-    ax.legend(); ax.grid(True, alpha=0.3, which="both")
-
-    fig.suptitle(f"[Track {track_name}] Confidence Calibration Diagnosis", fontsize=13)
-    fig.tight_layout()
-    out_path = out_dir / f"reliability_diagram_track{track_name}.png"
-    fig.savefig(out_path, dpi=300)
-    plt.close(fig)
-    return out_path
-
 
 def plot_tail_reliability(tail_by_track, out_dir):
     """상위 구간별 신뢰도 다이어그램(보고서 본문용). 10-분위 bin은 피싱이 상위 10% bin 하나에 몰려서 점이
@@ -312,7 +244,7 @@ def run_confidence_analysis():
     df = prepare_categorical(df)
     train_set, test_set = split_data(df)
 
-    # main.py::run_final()의 버전 C와 동일한 분할(CALIBRATION_VAL_SIZE)을 써야 같은 모델을 평가하게 됨.
+    # main.py::run_final()의 버전γ 와 동일한 분할(CALIBRATION_VAL_SIZE)을 써야 같은 모델을 평가하게 됨.
     train_sub, val_calib = train_test_split(
         train_set,
         test_size=CALIBRATION_VAL_SIZE,
@@ -345,9 +277,6 @@ def run_confidence_analysis():
         raw_tail, cal_tail = tail_bin_table(y_test, raw_proba), tail_bin_table(y_test, calib_proba)
         tail_by_track[track_name] = {"raw": raw_tail, "calibrated": cal_tail}
         _print_tail_table(raw_tail, cal_tail)
-        out_path = plot_reliability(track_name, raw_m, raw_bins, cal_m, cal_bins, raw_proba, calib_proba, _OUT_DIR)
-        print(f"신뢰도 다이어그램 저장: {out_path}")
-
         payload["tracks"][track_name] = {
             "raw": raw_m, "calibrated": cal_m,
             "quantile_bins": {"raw": bins_to_rows(raw_bins), "calibrated": bins_to_rows(cal_bins)},
