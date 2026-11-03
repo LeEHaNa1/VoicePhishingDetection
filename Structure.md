@@ -32,7 +32,8 @@
         ├── plot_curve.py
         ├── sensitivity_analysis.py
         ├── borderline_recheck.py
-        └── url_reliability_recheck.py
+        ├── url_reliability_recheck.py
+        └── measure_model_cost.py
 ```
 
 ---
@@ -533,6 +534,46 @@ CLI 모드가 아니라 `python -X utf8 -m Simulator.Detection.url_reliability_r
 
 ---
 
+### `Detection/measure_model_cost.py`
+
+역할: 최종 탐지 모델(XGBoost + isotonic calibrator, Track B/C)의 **모델 크기·연산량**을 기존 연구(이규혁 외, 2026, 표 5)와 같은 항목으로 측정하는 스크립트. 합성 데이터라 탐지 성능은, 메타데이터 기반이라 판정 시점은 기존 연구와 직접 비교할 수 없어서 자원 측면만 비교하기 위함. CLI 모드가 아니라 `python -X utf8 -m Simulator.Detection.measure_model_cost`로 실행.
+
+하는 일:
+
+- `run_final()`은 학습된 model을 반환/저장하지 않으므로, 같은 절차(`get_or_generate_final_dataset()` → `prepare_categorical()` → `split_data()` → train_sub/val_calib 분할 → `best_params.json` 하이퍼파라미터로 `train_model()` → `fit_calibrator()`)를 그대로 재현해 다시 학습. 재현 여부는 test PR-AUC로 확인(`run_final()`과 B 0.964677 / C 0.987047로 일치).
+- 측정 항목: 트리 수·노드 수(파라미터), 모델 파일 크기, 1회 추론 근사 연산량(ops), 입력 크기와 입력 길이 의존성, 1건 추론 시간, 1건 전처리 시간. 측정 환경(CPU·OS·라이브러리 버전)도 함께 기록.
+- 최종 모델(XGBoost) 외에 Optuna 비교에서 진 LightGBM도 같은 기준으로 참고 측정.
+- 1건씩 넣은 예측 확률이 배치 예측과 같은지 확인(category 코드북 어긋남 방지 확인용).
+
+측정 기준:
+
+- **파라미터** = 트리 노드 수(내부 노드 + 리프). 다른 기준(내부 노드×2 + 리프)도 json에 같이 기록. 기존 연구는 트리 모델의 계산 기준을 밝히지 않아 그 수치와 기준이 같다고 볼 수 없음.
+- **모델 크기**: MB = 2²⁰ bytes(기존 연구 KoBERT 수치 92.188M×4B=351.7과 같은 단위). XGBoost는 분할값·리프값을 float32로 저장 → FP32. LightGBM 텍스트 파일은 double 값을 10진 문자열로 저장. 양자화(INT8) 버전은 없음.
+- **1회 추론 연산량(ops, FLOPs와 다른 단위)** = 실제로 지나간 내부 노드 수(`pred_leaf`로 test 30,000건 각각의 도착 리프 깊이를 구해 정확히 셈, 노드 1개 = 비교 1회, 결측·범주형 분할 포함) + (트리 수+1) 덧셈 + sigmoid 3. 상한 = 트리별 최대 깊이의 합. isotonic 보정은 이진 탐색 ⌈log₂K⌉ + 보간 5로 계산.
+- **추론 시간**: 서로 다른 test 행 1,000건을 1건씩 예측, 워밍업 50회 후 측정. 1 thread 기준(기본 스레드 설정은 1건 예측에서 스레드 분배 비용 때문에 오히려 느림). Python/pandas 호출 비용 포함.
+- **전처리 시간**: 생성기 출력 형태의 요약 1행 → `add_candidate_features()` → feature 열 선택 → 학습 때와 같은 category 코드북 적용까지.
+
+#### 측정 결과 (2026-11-03, i5-1155G7 / Windows 11 / Python 3.10.6 / xgboost 3.2.0 / lightgbm 4.7.0 / scikit-learn 1.7.2)
+
+| 모델                   | 입력 크기 | 파라미터(노드)                        | 모델 크기 (MB)                                     | 1회 추론 연산량(ops, 평균 / 상한) | 입력 길이에 따라 증가 | 추론 시간(보정기 포함, 1 thread) |
+| ---------------------- | --------- | ------------------------------------- | -------------------------------------------------- | --------------------------------- | --------------------- | -------------------------------- |
+| XGBoost B (최종)       | 12 (고정) | 0.002069M (트리 101, 내부 984+리프 1,085) | 0.138 (UBJ, FP32) / 0.143 (보정기 포함 pickle) | 4.88×10² / 509 (보정기 포함 4.98×10²) | 아니오            | 2.601 ± 0.273 ms                 |
+| XGBoost C (최종)       | 19 (고정) | 0.001607M (트리 101, 내부 753+리프 854)   | 0.121 (UBJ, FP32) / 0.127 (보정기 포함 pickle) | 4.65×10² / 509 (보정기 포함 4.74×10²) | 아니오            | 3.453 ± 0.583 ms                 |
+| LightGBM B (참고)      | 12 (고정) | 0.003816M (트리 136, 내부 1,840+리프 1,976) | 0.224 (텍스트) / 0.228 (보정기 포함 pickle) | 7.82×10² / 820 (보정기 포함 7.92×10²) | 아니오            | 3.090 ± 0.987 ms                 |
+| LightGBM C (참고)      | 19 (고정) | 0.003286M (트리 136, 내부 1,575+리프 1,711) | 0.199 (텍스트) / 0.204 (보정기 포함 pickle) | 7.40×10² / 820 (보정기 포함 7.49×10²) | 아니오            | 2.535 ± 1.079 ms                 |
+
+- 전처리 시간(1건): XGBoost B 8.19 ± 3.46 ms, C 6.28 ± 0.80 ms. 대부분 pandas 처리 비용.
+- 입력 길이 의존성: 데이터에 통화 길이·전사문·이벤트 로그가 없고 사건 1건 = 고정 길이 요약 1행이라 입력 크기는 변하지 않음. 연산량은 트리 경로에 따라서만 달라지고 상한을 넘지 않음. 대리 지표로 본 XGBoost B 평균 ops: 반복 접촉 없음/있음 498.4/464.7, 순차 사칭 없음/있음 488.2/480.0.
+- 한계: 실제 단말 통화·문자 기록에서 요약 행을 만드는 단계는 구현되어 있지 않아 그 시간은 **측정 불가**. 추론·전처리 시간은 노트북에서 1회 측정한 값이라 실행마다 수 ms 범위에서 달라질 수 있음.
+
+#### 변경 내역 (2026-11-03)
+
+- `Simulator/Detection/measure_model_cost.py` 추가. 기존 파일의 코드(`main.py`, `train_eval.py` 등)는 수정하지 않고 import만 함.
+- LightGBM의 `save_model()`은 C++ 쪽에서 파일을 열어 한글 경로에 쓰지 못함(실행 시 오류 확인) → 직렬화 결과(`model_to_string()`)를 받아 Python으로 저장. XGBoost도 같은 방식(`save_raw()`)으로 맞춤(저장 내용은 `save_model()`과 동일).
+- `.gitignore`에 `model_cost_results/` 추가.
+
+---
+
 ## 결과물 저장 폴더
 
 코드를 실행하면 자동으로 생성되는 폴더들. 소스 코드가 아니라 실행 결과물임.
@@ -548,6 +589,7 @@ CLI 모드가 아니라 `python -X utf8 -m Simulator.Detection.url_reliability_r
 | `url_reliability_recheck_results/` | `is_reliable_url` stress 재검증 json(`url_reliability_recheck.json` — Track C 21개 기준, 레벨별 gain/permutation importance).                                                      | `.gitignore` 처리                                            |
 | `calibration_results/`             | confidence calibration 관련 산출물. `main.py`: `final_calibration_compare.json`(`calib_compare`). `eval_confidence.py`: `tail_reliability_diagram.png`, `confidence_metrics.json`. | `.gitignore` 처리                                            |
 | `plot_results/`                    | `plot_curve.py` 산출물 — `learning_curve_track{B,C}_{raw,calibrated}.png`, `cumulative_lift_track{B,C}_{raw,calibrated}.png`(총 8개, 보고서에는 이 중 Track C calibrated만 사용).  | `.gitignore` 처리                                            |
+| `model_cost_results/`              | `measure_model_cost.py` 산출물 — `model_cost.json`(상세 수치+측정 환경), `model_cost_table.md`(결과 표), `models/`(측정에 쓴 모델 파일: XGBoost `.json`/`.ubj`, LightGBM `.txt`, sklearn·보정기 포함 `.pkl`). | `.gitignore` 처리                                            |
 
 ---
 
