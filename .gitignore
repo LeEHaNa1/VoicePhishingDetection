@@ -28,3 +28,6 @@ url_reliability_recheck_results/
 calibration_results/
 # 모델 크기·연산량 측정 결과물 (measure_model_cost.py 실행하면 로컬에서 다시 생성됨, 커밋 대상 아님)
 model_cost_results/
+
+# γ 기준 permutation importance 재계산 결과물 (permutation_gamma.py 실행하면 로컬에서 다시 생성됨, 커밋 대상 아님)
+permutation_results/
